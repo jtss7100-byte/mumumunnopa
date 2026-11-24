@@ -1,0 +1,6 @@
+{
+  "name": "MUNPIA FORGE",
+  "description": "문피아 상업 웹소설 연재 기획, 25화 아크 설계, 5화 블록 가이드 및 1화 단위 정밀 서사 제어 설계도(JSON) 스튜디오",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
