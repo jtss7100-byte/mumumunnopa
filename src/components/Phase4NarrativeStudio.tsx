@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowDown,
+  ArrowRight,
   ArrowUp,
   Check,
   CheckCircle2,
@@ -14,6 +15,7 @@ import {
   FileText,
   Loader2,
   Lock,
+  PenLine,
   Plus,
   SlidersHorizontal,
   Sparkles,
@@ -67,6 +69,7 @@ interface Props {
   onGenerateBlockGuide: (blockIndex: number) => void;
   onGenerateBlueprint: (epRow: EpisodeGuideRow) => void;
   onAssembleFromMemo: (epNum: number, memo: string) => void;
+  onOpenInPhase5?: (epNum: number) => void;
 }
 
 const ANCHOR_SELECT_STYLES: Record<AnchorTag, string> = {
@@ -103,6 +106,7 @@ export const Phase4NarrativeStudioView: React.FC<Props> = ({
   onGenerateBlockGuide,
   onGenerateBlueprint,
   onAssembleFromMemo,
+  onOpenInPhase5,
 }) => {
   const startEp = activeBlockIndex * 5 + 1;
   const currentBlock = blocks.find((b) => b.blockIndex === activeBlockIndex) ?? null;
@@ -673,6 +677,18 @@ export const Phase4NarrativeStudioView: React.FC<Props> = ({
             <div className="flex flex-wrap items-center gap-2">
               {activeBlueprint && (
                 <>
+                  {onOpenInPhase5 && (
+                    <button
+                      type="button"
+                      data-testid="phase4-open-phase5"
+                      onClick={() => onOpenInPhase5(effectiveEpNum)}
+                      className="px-3 py-1.5 text-xs font-semibold text-slate-950 bg-amber-400 hover:bg-amber-300 rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                    >
+                      <PenLine className="w-3.5 h-3.5" />
+                      <span>이 설계도로 바로 집필하기</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={handleCopyMasterPrompt}

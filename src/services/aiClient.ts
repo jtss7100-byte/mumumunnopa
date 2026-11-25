@@ -1,5 +1,6 @@
 import type {
   ArcPlan,
+  BrainDumpAuditResult,
   BrainDumpParseResult,
   EpisodeBlockGuide,
   EpisodeGuideRow,
@@ -151,5 +152,52 @@ export async function requestBrainDumpParseAI(
     existingSummary,
     seriesMemoryText: mode === 'merge' ? seriesMemoryText?.trim() || undefined : undefined,
     ruleProfile,
+  });
+}
+
+export interface WriteScenePayload {
+  phase2: SettingBible | null;
+  blueprint: EpisodeNarrativeBlueprint;
+  sceneIndex: number;
+  ruleProfile: WritingRuleProfile;
+  seriesMemoryText?: string;
+  previousScenesText?: string;
+  targetChars: number;
+  styleMemo?: string;
+  revisionNote?: string;
+  currentSceneText?: string;
+}
+
+export interface WriteSceneResponse {
+  text: string;
+  summaryLine: string;
+}
+
+export async function writeScene(payload: WriteScenePayload): Promise<WriteSceneResponse> {
+  return postJson<WriteSceneResponse>('/api/ai/write-scene', {
+    ...payload,
+    seriesMemoryText: payload.seriesMemoryText?.trim() || undefined,
+    previousScenesText: payload.previousScenesText?.trim() || undefined,
+    styleMemo: payload.styleMemo?.trim() || undefined,
+    revisionNote: payload.revisionNote?.trim() || undefined,
+    currentSceneText: payload.currentSceneText?.trim() || undefined,
+  });
+}
+
+export interface BrainDumpAuditPayload {
+  memo: string;
+  mode: 'new' | 'merge';
+  ruleProfile?: WritingRuleProfile;
+  seriesMemoryText?: string;
+}
+
+export async function auditBrainDump(
+  payload: BrainDumpAuditPayload
+): Promise<BrainDumpAuditResult> {
+  return postJson<BrainDumpAuditResult>('/api/ai/brain-dump-audit', {
+    memo: payload.memo,
+    mode: payload.mode,
+    ruleProfile: payload.ruleProfile,
+    seriesMemoryText: payload.seriesMemoryText?.trim() || undefined,
   });
 }

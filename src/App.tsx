@@ -17,12 +17,17 @@ import type { CharacterArchetype } from './data/munpiaReferences';
 import type {
   EpisodeBlockGuide,
   EpisodeGuideRow,
+  EpisodeManuscript,
   EpisodeNarrativeBlueprint,
   NovelProject,
   WorkflowPhase,
   WritingRuleProfile,
 } from './types/novelPlanner';
-import { migrateProjectToV2, parseProjectBackupJson } from './utils/munpiaEngine';
+import {
+  createDefaultBlueprintForEpisode,
+  migrateProjectToV2,
+  parseProjectBackupJson,
+} from './utils/munpiaEngine';
 import { normalizeRuleProfile } from './utils/ruleProfileEngine';
 import {
   formatSaveTimeHHMMSS,
@@ -52,6 +57,7 @@ import { Phase1PreReadView } from './components/Phase1PreRead';
 import { Phase2SettingBibleView } from './components/Phase2SettingBible';
 import { Phase3ArcPlannerView } from './components/Phase3ArcPlanner';
 import { Phase4NarrativeStudioView } from './components/Phase4NarrativeStudio';
+import { Phase5ManuscriptWriterView } from './components/Phase5ManuscriptWriter';
 import { SeriesMemoryDashboardView } from './components/SeriesMemoryDashboard';
 import { MunpiaReferenceDrawer } from './components/MunpiaReferenceDrawer';
 
@@ -62,6 +68,7 @@ const PHASE_STEPS: Array<{ phase: WorkflowPhase; code: string; label: string; de
   { phase: 2, code: 'Phase 2', label: '세팅 바이블', desc: '엔진 · 세계관 · 인물표' },
   { phase: 3, code: 'Phase 3', label: '25화 아크', desc: '킥이벤트 · 3-Q 진단' },
   { phase: 4, code: 'Phase 4', label: '회차 설계도', desc: '5화 가이드 · JSON 빌더' },
+  { phase: 5, code: '5.', label: '본문 집필실 (Manuscript)', desc: '5,000자 집필 · 검수 · 내보내기' },
   { phase: 'memory', code: 'DB', label: '누적 시리즈 바이블', desc: '미회수 복선 · 인물 상태 · 용어' },
 ];
 
@@ -77,6 +84,7 @@ export default function App() {
 
   const [activeBlockIndex, setActiveBlockIndex] = useState<number>(0);
   const [targetPhase4EpNum, setTargetPhase4EpNum] = useState<number | null>(null);
+  const [targetPhase5EpNum, setTargetPhase5EpNum] = useState<number | null>(null);
   const [refDrawerOpen, setRefDrawerOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -166,6 +174,9 @@ export default function App() {
     setAiError(null);
     updateActiveProject((p) => ({ ...p, currentPhase: phase }));
     setMobileMenuOpen(false);
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
   };
 
   const handleCreateNewProject = () => {
@@ -300,11 +311,15 @@ export default function App() {
   };
 
   // AI Orchestrators
-  const handleRunBrainDump = async (mode: 'new' | 'merge') => {
-    const memo = (activeProject.brainDumpText ?? '').trim();
+  const handleRunBrainDump = async (mode: 'new' | 'merge', memoOverride?: string) => {
+    const rawMemo = typeof memoOverride === 'string' ? memoOverride : (activeProject.brainDumpText ?? '');
+    const memo = rawMemo.trim();
     if (memo.length < 10) {
       setAiError('아이디어 메모를 최소 10자 이상 입력한 뒤 자동 파싱을 실행해 주세요.');
       return;
+    }
+    if (typeof memoOverride === 'string' && memoOverride !== (activeProject.brainDumpText ?? '')) {
+      updateActiveProject((p) => ({ ...p, brainDumpText: memoOverride }));
     }
     setAiError(null);
     setLoadingTask('braindump');
@@ -525,7 +540,50 @@ export default function App() {
     if (phase === 1) return Boolean(activeProject.phase1);
     if (phase === 2) return Boolean(activeProject.phase2);
     if (phase === 3) return Boolean(activeProject.phase3);
-    return Object.keys(activeProject.blueprints).length > 0;
+    if (phase === 4) return Object.keys(activeProject.blueprints).length > 0;
+    if (phase === 5) {
+      return Object.values(activeProject.manuscripts ?? {}).some(
+        (ms) =>
+          Boolean(ms.customFullText?.trim()) ||
+          Object.values(ms.sceneDrafts ?? {}).some((d) => d.text.trim().length > 0)
+      );
+    }
+    return false;
+  };
+
+  const handleApplyNextEpisodePrev = (currentEpNum: number, summaryText: string) => {
+    const nextEpNum = currentEpNum + 1;
+    updateActiveProject((p) => {
+      const existingNext = p.blueprints[nextEpNum];
+      if (existingNext) {
+        return {
+          ...p,
+          blueprints: {
+            ...p.blueprints,
+            [nextEpNum]: { ...existingNext, prev: summaryText },
+          },
+        };
+      }
+      const nextGuide = p.phase4Blocks
+        .flatMap((b) => b.episodes)
+        .find((row) => row.episodeNumber === nextEpNum);
+      const castNames = p.phase2?.characters.map((c) => c.name) ?? ['주인공', '조력자'];
+      const createdNext = createDefaultBlueprintForEpisode(
+        nextEpNum,
+        nextGuide?.oneLineTitle || `${nextEpNum}화 설계도`,
+        summaryText,
+        p.phase2?.basicInfo.pov || "1인칭 '나'",
+        castNames
+      );
+      return {
+        ...p,
+        blueprints: {
+          ...p.blueprints,
+          [nextEpNum]: createdNext,
+        },
+      };
+    });
+    showNotice(`${nextEpNum}화 설계도의 prev 요약에 반영했습니다.`);
   };
 
   const activePhaseMeta =
@@ -795,6 +853,8 @@ export default function App() {
               currentProjectTitle={
                 activeProject.phase2?.title || activeProject.phase0.workingTitle || '제목 미정'
               }
+              ruleProfile={projectRuleProfile}
+              seriesMemoryText={seriesMemoryPromptText}
               report={activeProject.lastBrainDumpReport ?? null}
               remainingEstimatedCount={(activeProject.aiEstimatedFields ?? []).length}
               isParsing={loadingTask === 'braindump'}
@@ -926,6 +986,54 @@ export default function App() {
               onGenerateBlockGuide={handleGenerateBlockGuide}
               onGenerateBlueprint={handleGenerateBlueprint}
               onAssembleFromMemo={handleAssembleBlueprintFromMemo}
+              onOpenInPhase5={(epNum) => {
+                setTargetPhase5EpNum(epNum);
+                setPhase(5);
+              }}
+            />
+          )}
+
+          {activeProject.currentPhase === 5 && (
+            <Phase5ManuscriptWriterView
+              targetEpNum={targetPhase5EpNum}
+              blueprints={activeProject.blueprints}
+              manuscripts={activeProject.manuscripts ?? {}}
+              settingBible={activeProject.phase2}
+              projectRuleProfile={projectRuleProfile}
+              episodeRuleOverrides={activeProject.episodeRuleOverrides ?? {}}
+              seriesMemoryText={seriesMemoryPromptText}
+              onUpdateManuscript={(epNum: number, nextMs: EpisodeManuscript) =>
+                updateActiveProject((p) => ({
+                  ...p,
+                  manuscripts: {
+                    ...(p.manuscripts ?? {}),
+                    [epNum]: nextMs,
+                  },
+                }))
+              }
+              onUpdateEpisodeRuleOverride={(epNum, nextProfile) =>
+                updateActiveProject((p) => ({
+                  ...p,
+                  episodeRuleOverrides: {
+                    ...(p.episodeRuleOverrides ?? {}),
+                    [epNum]: nextProfile,
+                  },
+                }))
+              }
+              onClearEpisodeRuleOverride={(epNum) =>
+                updateActiveProject((p) => {
+                  const copy = { ...(p.episodeRuleOverrides ?? {}) };
+                  delete copy[epNum];
+                  return { ...p, episodeRuleOverrides: copy };
+                })
+              }
+              onApplyNextEpisodePrev={handleApplyNextEpisodePrev}
+              onGoToPhase4={(epNum) => {
+                setActiveBlockIndex(Math.floor((Math.max(1, epNum) - 1) / 5));
+                setTargetPhase4EpNum(Math.max(1, epNum));
+                setPhase(4);
+              }}
+              onNotify={showNotice}
             />
           )}
 

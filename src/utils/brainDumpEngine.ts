@@ -1,6 +1,12 @@
 import { CHARACTER_ARCHETYPES } from '../data/munpiaReferences';
 import type {
   ArcPlan,
+  BrainDumpAuditFlag,
+  BrainDumpAuditMissingItem,
+  BrainDumpAuditResult,
+  BrainDumpAuditStatus,
+  BrainDumpFlagIssueType,
+  BrainDumpMissingCategory,
   BrainDumpParseResult,
   BrainDumpReport,
   CharacterCard,
@@ -511,4 +517,144 @@ export function mergeBrainDumpIntoProject(
     phase4Blocks: mergedPhase4Blocks,
     blueprints: finalBlueprints,
   };
+}
+
+const VALID_MISSING_CATEGORIES: BrainDumpMissingCategory[] = [
+  '주인공/욕망',
+  '능력/제약',
+  '갈등/빌런',
+  '1화 사건',
+  '세계관 룰',
+  '톤/타깃',
+];
+
+const VALID_FLAG_ISSUE_TYPES: BrainDumpFlagIssueType[] = [
+  '설정 모순',
+  '상업/이탈 위험',
+  '플랫폼/수위 주의',
+  '규칙 충돌',
+];
+
+/**
+ * Normalizes and validates raw AI audit output so score bounds, IDs, enums,
+ * and status severity rules (any high-severity flag forces 'warning') are always consistent.
+ */
+export function normalizeBrainDumpAuditResult(
+  raw: Partial<BrainDumpAuditResult> | null | undefined
+): BrainDumpAuditResult {
+  const scoreRaw = typeof raw?.sufficiencyScore === 'number' ? raw.sufficiencyScore : 50;
+  const sufficiencyScore = Math.max(0, Math.min(100, Math.round(scoreRaw)));
+
+  const missingItems: BrainDumpAuditMissingItem[] = Array.isArray(raw?.missingItems)
+    ? raw.missingItems
+        .filter((item): item is BrainDumpAuditMissingItem => Boolean(item && typeof item === 'object'))
+        .map((item, idx) => ({
+          id: item.id?.trim() || `missing-${idx + 1}`,
+          category: VALID_MISSING_CATEGORIES.includes(item.category)
+            ? item.category
+            : '주인공/욕망',
+          reason: String(item.reason ?? '').trim(),
+          question: String(item.question ?? '').trim(),
+          quickOptions: Array.isArray(item.quickOptions)
+            ? item.quickOptions.map((o) => String(o).trim()).filter(Boolean)
+            : [],
+        }))
+        .filter((item) => item.question.length > 0 || item.reason.length > 0)
+    : [];
+
+  const inappropriateFlags: BrainDumpAuditFlag[] = Array.isArray(raw?.inappropriateFlags)
+    ? raw.inappropriateFlags
+        .filter((flag): flag is BrainDumpAuditFlag => Boolean(flag && typeof flag === 'object'))
+        .map((flag, idx): BrainDumpAuditFlag => ({
+          id: flag.id?.trim() || `flag-${idx + 1}`,
+          severity: flag.severity === 'high' ? 'high' : 'medium',
+          issueType: VALID_FLAG_ISSUE_TYPES.includes(flag.issueType)
+            ? flag.issueType
+            : '상업/이탈 위험',
+          quotedPart: String(flag.quotedPart ?? '').trim(),
+          reason: String(flag.reason ?? '').trim(),
+          fixSuggestions: Array.isArray(flag.fixSuggestions)
+            ? flag.fixSuggestions.map((s) => String(s).trim()).filter(Boolean)
+            : [],
+        }))
+        .filter((flag) => flag.reason.length > 0)
+    : [];
+
+  const hasHighFlag = inappropriateFlags.some((f) => f.severity === 'high');
+  let status: BrainDumpAuditStatus =
+    raw?.status === 'ready' || raw?.status === 'needs_more' || raw?.status === 'warning'
+      ? raw.status
+      : 'needs_more';
+
+  if (hasHighFlag) {
+    status = 'warning';
+  } else if (status === 'ready' && missingItems.length > 0 && sufficiencyScore < 65) {
+    status = 'needs_more';
+  }
+
+  const verdictSummary =
+    String(raw?.verdictSummary ?? '').trim() ||
+    (status === 'warning'
+      ? '설계도 생성 전 확인이 필요한 설정 모순 또는 위험 요소가 감지되었습니다.'
+      : status === 'needs_more'
+        ? '억지 추론을 줄이려면 몇 가지 핵심 재료를 조금 더 보충해 주세요.'
+        : '핵심 재료가 충분해 바로 전체 자동 세팅을 진행할 수 있습니다.');
+
+  return {
+    status,
+    sufficiencyScore,
+    verdictSummary,
+    missingItems,
+    inappropriateFlags,
+  };
+}
+
+export interface BrainDumpAuditAnswer {
+  selectedOption?: string;
+  customText?: string;
+}
+
+/**
+ * Formats writer-selected quick options and custom answers from the pre-audit report
+ * into a clean [보충·수정 메모] block ready to append to the Brain Dump notepad.
+ */
+export function buildSupplementMemoBlock(
+  audit: BrainDumpAuditResult,
+  missingAnswers: Record<string, BrainDumpAuditAnswer>,
+  flagAnswers: Record<string, BrainDumpAuditAnswer>
+): string {
+  const lines: string[] = [];
+
+  for (const item of audit.missingItems) {
+    const ans = missingAnswers[item.id];
+    const parts = [ans?.selectedOption?.trim(), ans?.customText?.trim()].filter(
+      (v): v is string => Boolean(v)
+    );
+    if (parts.length === 0) continue;
+    lines.push(`- [보충 · ${item.category}] ${item.question} → ${parts.join(' / ')}`);
+  }
+
+  for (const flag of audit.inappropriateFlags) {
+    const ans = flagAnswers[flag.id];
+    const parts = [ans?.selectedOption?.trim(), ans?.customText?.trim()].filter(
+      (v): v is string => Boolean(v)
+    );
+    if (parts.length === 0) continue;
+    const quoteRef = flag.quotedPart ? ` (대상: "${flag.quotedPart.slice(0, 48)}")` : '';
+    lines.push(`- [수정 반영 · ${flag.issueType}]${quoteRef} → ${parts.join(' / ')}`);
+  }
+
+  if (lines.length === 0) return '';
+  return `[보충·수정 메모]\n${lines.join('\n')}`;
+}
+
+/**
+ * Appends a [보충·수정 메모] block cleanly to the end of the writer's Brain Dump memo.
+ */
+export function appendSupplementToMemo(originalMemo: string, supplementBlock: string): string {
+  const trimmedBlock = supplementBlock.trim();
+  if (!trimmedBlock) return originalMemo;
+  const trimmedOrig = originalMemo.trimEnd();
+  if (!trimmedOrig) return trimmedBlock;
+  return `${trimmedOrig}\n\n${trimmedBlock}`;
 }

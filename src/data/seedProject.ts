@@ -490,6 +490,7 @@ export const SEED_MUNPIA_PROJECT: NovelProject = {
       ],
     },
   },
+  manuscripts: {},
 };
 
 export function createBlankProject(workingTitle = '새 문피아 연재 기획'): NovelProject {
@@ -514,5 +515,6 @@ export function createBlankProject(workingTitle = '새 문피아 연재 기획')
     phase3: null,
     phase4Blocks: [],
     blueprints: {},
+    manuscripts: {},
   };
 }

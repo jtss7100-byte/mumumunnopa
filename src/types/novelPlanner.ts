@@ -14,7 +14,7 @@ export type {
   SceneSuggestionResult,
 };
 
-export type WorkflowPhase = 'dump' | 0 | 1 | 2 | 3 | 4 | 'memory';
+export type WorkflowPhase = 'dump' | 0 | 1 | 2 | 3 | 4 | 5 | 'memory';
 
 export type RuleProfilePreset = 'vol1_survival' | 'main_climax' | 'breather_buildup' | 'custom';
 
@@ -220,6 +220,25 @@ export interface EpisodeBlockGuide {
   checklist: Array<{ id: string; text: string; checked: boolean }>;
 }
 
+export interface SceneDraft {
+  sceneId: string;
+  sceneName: string;
+  text: string;
+  updatedAt: string;
+  charCountWithSpaces: number;
+  charCountNoSpaces: number;
+}
+
+export interface EpisodeManuscript {
+  episodeNumber: number;
+  title: string;
+  sceneDrafts: Record<string, SceneDraft>;
+  sceneSummaries?: Record<string, string>;
+  customFullText?: string | null;
+  styleMemo: string;
+  updatedAt: string;
+}
+
 export interface NovelProject {
   id: string;
   updatedAt: string;
@@ -235,10 +254,52 @@ export interface NovelProject {
   phase3: ArcPlan | null;
   phase4Blocks: EpisodeBlockGuide[];
   blueprints: Record<number, EpisodeNarrativeBlueprint>;
+  manuscripts?: Record<number, EpisodeManuscript>;
 }
 
 export interface DraftWarning {
   severity: '경고' | '주의' | '권장';
   category: string;
   message: string;
+}
+
+export type BrainDumpAuditStatus = 'ready' | 'needs_more' | 'warning';
+
+export type BrainDumpMissingCategory =
+  | '주인공/욕망'
+  | '능력/제약'
+  | '갈등/빌런'
+  | '1화 사건'
+  | '세계관 룰'
+  | '톤/타깃';
+
+export interface BrainDumpAuditMissingItem {
+  id: string;
+  category: BrainDumpMissingCategory;
+  reason: string;
+  question: string;
+  quickOptions: string[];
+}
+
+export type BrainDumpFlagIssueType =
+  | '설정 모순'
+  | '상업/이탈 위험'
+  | '플랫폼/수위 주의'
+  | '규칙 충돌';
+
+export interface BrainDumpAuditFlag {
+  id: string;
+  severity: 'high' | 'medium';
+  issueType: BrainDumpFlagIssueType;
+  quotedPart: string;
+  reason: string;
+  fixSuggestions: string[];
+}
+
+export interface BrainDumpAuditResult {
+  status: BrainDumpAuditStatus;
+  sufficiencyScore: number;
+  verdictSummary: string;
+  missingItems: BrainDumpAuditMissingItem[];
+  inappropriateFlags: BrainDumpAuditFlag[];
 }

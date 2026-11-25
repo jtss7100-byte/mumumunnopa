@@ -9,7 +9,11 @@ import {
   is503UnavailableError,
   withGeminiRetry,
 } from './src/utils/geminiRetry.ts';
-import { buildDynamicRulesInstruction } from './src/utils/ruleProfileEngine.ts';
+import {
+  buildDynamicRulesInstruction,
+  normalizeRuleProfile,
+} from './src/utils/ruleProfileEngine.ts';
+import { normalizeBrainDumpAuditResult } from './src/utils/brainDumpEngine.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -596,6 +600,91 @@ const brainDumpResponseSchema: Schema = {
   ],
 };
 
+const writeSceneSchema: Schema = {
+  type: Type.OBJECT,
+  properties: {
+    text: {
+      type: Type.STRING,
+      description: '모바일 웹소설 포맷으로 완성된 해당 씬의 순수 본문 (마크다운 기호·씬 제목·해설 주석 금지)',
+    },
+    summaryLine: {
+      type: Type.STRING,
+      description: '이 씬에서 일어난 핵심 사건·변화를 다음 화 prev 연결용으로 압축한 1문장 요약',
+    },
+  },
+  required: ['text', 'summaryLine'],
+};
+
+const brainDumpAuditSchema: Schema = {
+  type: Type.OBJECT,
+  properties: {
+    status: {
+      type: Type.STRING,
+      enum: ['ready', 'needs_more', 'warning'],
+      description: '사전 재료 검수 판정 상태 (ready / needs_more / warning)',
+    },
+    sufficiencyScore: {
+      type: Type.INTEGER,
+      description: 'AI가 억지 추론 없이 설계도를 뽑을 수 있는 재료 충실도 (0~100 정수)',
+    },
+    verdictSummary: {
+      type: Type.STRING,
+      description: '편집자 한 줄 총평',
+    },
+    missingItems: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          id: { type: Type.STRING },
+          category: {
+            type: Type.STRING,
+            enum: ['주인공/욕망', '능력/제약', '갈등/빌런', '1화 사건', '세계관 룰', '톤/타깃'],
+          },
+          reason: { type: Type.STRING },
+          question: { type: Type.STRING },
+          quickOptions: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+        },
+        required: ['id', 'category', 'reason', 'question', 'quickOptions'],
+      },
+    },
+    inappropriateFlags: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          id: { type: Type.STRING },
+          severity: {
+            type: Type.STRING,
+            enum: ['high', 'medium'],
+          },
+          issueType: {
+            type: Type.STRING,
+            enum: ['설정 모순', '상업/이탈 위험', '플랫폼/수위 주의', '규칙 충돌'],
+          },
+          quotedPart: { type: Type.STRING },
+          reason: { type: Type.STRING },
+          fixSuggestions: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+        },
+        required: ['id', 'severity', 'issueType', 'quotedPart', 'reason', 'fixSuggestions'],
+      },
+    },
+  },
+  required: [
+    'status',
+    'sufficiencyScore',
+    'verdictSummary',
+    'missingItems',
+    'inappropriateFlags',
+  ],
+};
+
 const MUNPIA_18_ARCHETYPES_PROMPT = `문피아 18종 캐릭터 아키타입 번호표 (반드시 번호와 이름 일치):
 [주인공 1~7] 1:냉철한 계산형 / 2:복수귀·집념형 / 3:느긋한 먼치킨형 / 4:생존 본능형 / 5:오만·당당형 / 6:호구→각성형 / 7:전문가·직업인형
 [히로인/조연 8~13] 8:차가운 미녀형 / 9:밝은 조력자형 / 10:스승·노괴형 / 11:라이벌→동료형 / 12:충신·부하형 / 13:마스코트·귀요미형
@@ -999,6 +1088,264 @@ ${rawMemo}
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : '아이디어 덤프 자동 파싱에 실패했습니다.';
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/ai/brain-dump-audit', async (req, res) => {
+    try {
+      const { memo, mode, ruleProfile, seriesMemoryText } = req.body ?? {};
+      const rawMemo = typeof memo === 'string' ? memo.trim() : '';
+      if (rawMemo.length < 5) {
+        return res.status(400).json({
+          error: '사전 검수를 진행하려면 아이디어 메모를 최소 5자 이상 입력해 주세요.',
+        });
+      }
+
+      const auditMode: 'new' | 'merge' = mode === 'merge' ? 'merge' : 'new';
+      const normalizedProfile = normalizeRuleProfile(ruleProfile);
+      const dynamicRules = buildDynamicRulesInstruction(normalizedProfile, 'brain_dump');
+
+      const isRelaxedRuleMode =
+        normalizedProfile.preset === 'breather_buildup' ||
+        normalizedProfile.plotFramework === 'slice_buildup' ||
+        normalizedProfile.plotFramework === 'freeform';
+
+      const ruleRespectNote = isRelaxedRuleMode
+        ? `[활성 규칙 프로필 존중 필수]: 현재 작가는 쉬어가기·빌드업/일상/자유 구성 모드(${normalizedProfile.preset} / ${normalizedProfile.plotFramework})를 선택했습니다. 1권 생존 모드의 빡센 상업 기준(매 화 즉각 전투·보상·1~5화 패 공개 강제 등)을 들이대며 불필요한 경고(inappropriateFlags)를 띄우지 마십시오.`
+        : `[활성 규칙 프로필 기준]: 현재 활성 규칙(${normalizedProfile.preset} / ${normalizedProfile.plotFramework})에서 ON으로 켜진 항목만 기준으로 규칙 충돌 여부를 진단하십시오.`;
+
+      const mergeFocusNote =
+        auditMode === 'merge' && typeof seriesMemoryText === 'string' && seriesMemoryText.trim()
+          ? `[기존 작품 병합(merge) 모드 집중 점검]: 위 [누적 시리즈 바이블]에 이미 확정된 기존 설정·인물 상태·고유명사·미회수 복선과 새로 적은 메모가 앞뒤로 충돌(설정 모순)하는지 최우선으로 점검하십시오. 병합 모드에서는 이미 작품 바이블에 채워져 있는 기본 설정이 새 메모에 반복 적혀 있지 않더라도 무조건 누락으로 감점하지 마십시오.`
+          : `[신규 작품 생성(new) 모드 점검]: 이 메모만으로 Phase 1~4 전체 설계도를 억지 추론 없이 조립할 수 있는지 핵심 4축(주인공 성격·욕망 / 핵심 능력·차별점 / 갈등 대상·빌런 / 1화 사건·세계관 룰)을 엄격하게 점검하십시오.`;
+
+      const prompt = prependSeriesMemory(
+        `당신은 한국 상업 웹소설(문피아) 전문 수석 편집자입니다.
+작가가 0단계 아이디어 덤프에 적은 자유 메모를 바탕으로, 전체 자동 세팅(Phase 1~4)을 실행하기 전에 **재료 충실도·누락 항목·설정 모순·상업/플랫폼 위험 요소**를 솔직하고 정밀하게 사전 검수하십시오.
+
+${mergeFocusNote}
+${ruleRespectNote}
+
+${dynamicRules}
+
+[작가의 자유 입력 아이디어 메모 (${rawMemo.length}자)]:
+${rawMemo}
+
+[엄격한 판정 지침 — 반드시 준수]:
+1. **억지 칭찬 금지 & 부족 진단 (needs_more):**
+   - 신규 모드에서 메모가 너무 짧거나 핵심 축(주인공 성격·목표·차별점/능력·갈등 대상 중 2개 이상)이 비어 있으면 절대 억지로 칭찬하며 ready를 주지 말고, 반드시 \`status: "needs_more"\`를 반환하십시오.
+   - 부족한 항목은 \`missingItems\`에 2~4개의 구체적인 보충 질문(\`question\`), 누락 이유(\`reason\`), 그리고 작가가 클릭 한 번으로 고를 수 있는 매력적인 선택지(\`quickOptions\` 2~4개)를 제시하십시오.
+2. **부적절·모순·위험 감지 (inappropriateFlags):**
+   - 앞뒤 설정 모순(예: 폐맥 약골인데 이유 없이 최강 무공 사용, merge 시 기존 누적 바이블 인물 상태/세계관 룰 충돌) → \`issueType: "설정 모순"\`
+   - 문피아 코어 독자 이탈 위험(예: 주인공의 극단적 수동성·고구마 전개, 사건 없는 장황한 설명충 구조, 목표 부재) → \`issueType: "상업/이탈 위험"\`
+   - 플랫폼 규정·과도한 수위(선정성·혐오·범죄 미화)·저작권/타 유명 작품 고유명사 직접 차용 위험 → \`issueType: "플랫폼/수위 주의"\`
+   - 현재 ON 상태인 활성 작법 규칙과 정면 충돌하는 구조 → \`issueType: "규칙 충돌"\`
+   - 감지된 각 항목에는 반드시 원문 메모의 문제 조각을 그대로 인용한 \`quotedPart\`, 구체적인 \`reason\`, 그리고 어떻게 고치면 상업적으로 살아나는지 실전 대안 \`fixSuggestions\` 2개를 제시하십시오.
+   - \`inappropriateFlags\` 중 \`severity: "high"\`가 1개 이상이면 반드시 \`status: "warning"\`을 반환하십시오.
+3. **ready 판정:**
+   - 핵심 축이 충분히 갖춰져 있고 \`severity: "high"\` 경고가 없으며 AI가 억지 추론 없이 설계도를 뽑을 수 있다면 \`status: "ready"\`, \`sufficiencyScore\` 75~100으로 판정하십시오.
+4. 모든 ID(\`id\`)는 \`m1\`, \`m2\`, \`f1\`, \`f2\`처럼 고유한 짧은 문자열로 채우십시오.`,
+        auditMode === 'merge' ? seriesMemoryText : undefined
+      );
+
+      const raw = await generateStructuredJson<Record<string, unknown>>(prompt, brainDumpAuditSchema, {
+        tier: 'medium',
+      });
+
+      const normalized = normalizeBrainDumpAuditResult(raw);
+      return res.json({ data: normalized });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '아이디어 덤프 사전 검수에 실패했습니다.';
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/ai/write-scene', async (req, res) => {
+    try {
+      const {
+        phase2,
+        blueprint,
+        sceneIndex,
+        ruleProfile,
+        seriesMemoryText,
+        previousScenesText,
+        targetChars,
+        styleMemo,
+        revisionNote,
+        currentSceneText,
+      } = req.body;
+
+      if (!blueprint || !Array.isArray(blueprint.scenes) || blueprint.scenes.length === 0) {
+        return res.status(400).json({ error: '집필할 회차 서사 설계도(blueprint.scenes)가 필요합니다.' });
+      }
+
+      const idx = Number(sceneIndex);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= blueprint.scenes.length) {
+        return res.status(400).json({ error: '유효한 씬 인덱스(sceneIndex)가 필요합니다.' });
+      }
+
+      const scene = blueprint.scenes[idx];
+      const sceneId = scene.id || `S${idx + 1}`;
+      const normalizedProfile = normalizeRuleProfile(ruleProfile);
+      const dynamicRules = buildDynamicRulesInstruction(normalizedProfile, 'blueprint');
+
+      const safeTargetChars = Math.max(300, Math.round(Number(targetChars) || scene.target_chars || 1250));
+      const minChars = Math.round(safeTargetChars * 0.85);
+      const maxChars = Math.round(safeTargetChars * 1.15);
+
+      const isWinScene = Boolean(
+        (blueprint.win?.scene_id && scene.id && blueprint.win.scene_id === scene.id) ||
+          (blueprint.win?.scene && blueprint.win.scene === scene.name)
+      );
+      const shouldStretchReward =
+        normalizedProfile.toggles.stretchRewardScene &&
+        isWinScene &&
+        Boolean(blueprint.win?.stretch);
+
+      const sceneCharacters = (phase2?.characters || []).filter((ch: { name?: string }) => {
+        const castList: string[] = Array.isArray(scene.cast) ? scene.cast : [];
+        if (castList.length === 0) return true;
+        const cleanCharName = String(ch.name || '').replace(/\([^)]*\)/g, '').trim();
+        return castList.some((c) => {
+          const cleanCast = String(c).replace(/\([^)]*\)/g, '').trim();
+          return cleanCast && cleanCharName && (cleanCast.includes(cleanCharName) || cleanCharName.includes(cleanCast));
+        });
+      });
+
+      const characterGuide = (sceneCharacters.length > 0 ? sceneCharacters : phase2?.characters || [])
+        .map(
+          (ch: {
+            name?: string;
+            role?: string;
+            outerPersonality?: string;
+            innerPersonality?: string;
+            speechNote?: string;
+          }) =>
+            `- ${ch.name || '인물'} (${ch.role || ''}) | 겉: ${ch.outerPersonality || ''} | 속: ${ch.innerPersonality || ''} | 말투(speechNote): ${ch.speechNote || '자연스러운 구어체'}`
+        )
+        .join('\n');
+
+      const terminologyGuide = (phase2?.worldview?.terminology || [])
+        .map((t: { term?: string; meaning?: string }) => `${t.term || ''}: ${t.meaning || ''}`)
+        .join(' / ');
+
+      const anchorsList = (scene.anchors || [])
+        .map((a: [string, string], i: number) => `${i + 1}. [${a[0]}] ${a[1]}`)
+        .join('\n');
+
+      const keyLinesList = (scene.key_lines || [])
+        .map((line: string) => String(line).trim())
+        .filter(Boolean);
+
+      const avoidList = (blueprint.avoid || [])
+        .map((rule: string) => String(rule).trim())
+        .filter(Boolean);
+
+      const sceneLaughs = (blueprint.laugh || []).filter(
+        (l: { scene_id?: string; scene?: string }) =>
+          (l.scene_id && l.scene_id === sceneId) || l.scene === scene.name
+      );
+      const scenePlants = (blueprint.threads?.plant || []).filter(
+        (p: { scene_id?: string; scene?: string }) =>
+          (p.scene_id && p.scene_id === sceneId) || p.scene === scene.name
+      );
+      const scenePayoffs = (blueprint.threads?.payoff || []).filter(
+        (p: { scene_id?: string; scene?: string }) =>
+          (p.scene_id && p.scene_id === sceneId) || p.scene === scene.name
+      );
+
+      const extraSystem = `당신은 문피아·네이버 시리즈·카카오페이지 상위권 상업 웹소설 본문 전담 작가입니다.
+아래 모바일 웹소설 집필 절대 규칙을 단 하나도 어기지 말고 본문(text)을 작성하십시오:
+1. [모바일 웹소설 포맷] 문단당 1~3문장으로 짧게 끊고 문단 사이에 빈 줄(\\n\\n)을 넣어 호흡을 나누십시오. 지문과 큰따옴표("...") 대사를 명확히 분리하십시오.
+2. [순수 원고 전용] 마크다운 기호(**, ##, -, *, > 등), 씬 번호/제목(예: S1, [장면 1]), 해설 주석, 글자 수 표기는 본문(text)에 절대 출력하지 마십시오.
+3. [목표 분량 준수] 해당 씬의 목표 글자 수(${safeTargetChars}자, 공백 포함)의 ±15% 범위(${minChars}자 ~ ${maxChars}자)로 충실하게 집필하십시오. 앵커 비트를 요약문으로 뭉개지 말고 구체적인 행동·대화·감각 장면으로 펼쳐 쓰십시오.
+4. [v2 슬롯 & 말투 엄수] 세팅 바이블 인물의 speechNote 말투와 겉/속 성격을 유지하고, 씬의 sensory(감각)·subtext(이면 심리)를 자연스럽게 녹여 쓰십시오. key_lines에 지정된 문장은 토씨 하나 바꾸지 말고 원문 그대로 결정적 순간에 삽입하십시오. avoid 금지선은 단 한 줄도 위반하지 마십시오.
+5. [동적 규칙 연동] 오직 전달된 활성 규칙 프로필에서 ON으로 켜진 규칙만 적용하십시오.${
+        shouldStretchReward
+          ? `\n6. [핵심 보상 씬 Showing 극대화 필수] 현재 씬은 핵심 보상 씬(win.scene)이며 win.stretch: true 및 stretchRewardScene 규칙이 활성화되어 있습니다. 씬의 sensory 디테일과 주변 인물의 win.reaction("${blueprint.win?.reaction || ''}")을 극대화해 보여주기식(Showing)으로 호흡을 길고 강렬하게 늘려 쓰십시오.`
+          : ''
+      }`;
+
+      const prevContextBlock =
+        typeof previousScenesText === 'string' && previousScenesText.trim()
+          ? `[직전 씬 마지막 본문 — 중복 설명 없이 아래 마지막 문장에서 곧바로 자연스럽게 이어서 집필할 것]:\n${previousScenesText.trim().slice(-1600)}`
+          : `[첫 씬 도입]: 이번 회차의 시작 씬입니다.${blueprint.prev ? ` (이전 화 연결 맥락: ${blueprint.prev})` : ''}`;
+
+      const revisionBlock =
+        typeof revisionNote === 'string' && revisionNote.trim() && typeof currentSceneText === 'string' && currentSceneText.trim()
+          ? `[부분 리라이팅 모드 — 기존 씬 원고의 전체 흐름과 완성된 대사·장면은 유지하되, 작가의 수정 지시만 정밀하게 반영해 다시 쓰십시오]
+- 작가 수정 요청사항: ${revisionNote.trim()}
+- 기존 씬 원고:
+${currentSceneText.trim()}`
+          : '';
+
+      const prompt = prependSeriesMemory(
+        `다음 회차 설계도와 현재 씬 지시서를 바탕으로 실제 웹소설 본문 1개 씬을 집필하십시오.
+
+[작품 & 회차 메타]
+- 작품명: ${phase2?.title || '미정'}
+- 회차: ${blueprint.episode || ''} ${blueprint.title || ''}
+- 시점(POV): ${blueprint.pov || phase2?.basicInfo?.pov || "1인칭 '나'"}
+- 회차 목표(goal): ${blueprint.goal || ''}
+- 실패 리스크(stake): ${blueprint.stake || ''}
+- 내면 서술 비중(inner): ${blueprint.inner || ''}
+- 문체 톤(prose_tone): ${blueprint.prose_tone || '자연스러운 문피아 상업 톤'}
+- 정보 낙차(info_gap): ${blueprint.info_gap || '없음'}
+- 작가 추가 문체 메모(styleMemo): ${styleMemo ? String(styleMemo).trim() : '없음'}
+- 전역 금지선(avoid): ${avoidList.length > 0 ? avoidList.join(' / ') : '없음'}
+
+[등장인물 말투 & 성격 가이드]
+${characterGuide || '설계도 cast 기준 자연스럽게 전개'}
+${terminologyGuide ? `[확정 고유명사 사전]: ${terminologyGuide}` : ''}
+
+${dynamicRules}
+
+[현재 집필 대상 씬: ${sceneId} (${idx + 1}/${blueprint.scenes.length}) — "${scene.name}"]
+- 목표 분량: 공백 포함 약 ${safeTargetChars}자 (허용 범위: ${minChars}~${maxChars}자)
+- 긴장도: ${scene.tension}/5 | 적대 갈등: ${scene.hostile ? '있음' : '없음'}
+- 등장인물 화이트리스트(cast): ${(scene.cast || []).join(', ') || '주인공'}
+- 사용 고유명사(terms): ${(scene.terms || []).join(', ') || '없음'}
+- 연출 메모(note): ${scene.note || '없음'}
+- 현장 감각 앵커(sensory): ${scene.sensory || '장면에 맞는 구체적 시청각·촉각 감각 묘사'}
+- 이면 심리전(subtext): ${scene.subtext || '없음'}
+- 원문 무수정 필수 삽입 대사/문장(key_lines — 반드시 토씨 하나 수정 없이 원문 그대로 삽입):
+${keyLinesList.length > 0 ? keyLinesList.map((l: string, i: number) => `  ${i + 1}. ${l}`).join('\n') : '  (없음)'}
+- 씬 전개 앵커 비트(anchors — 순서대로 모두 장면화):
+${anchorsList || '  (자유 전개)'}
+${isWinScene ? `- [핵심 보상 씬 지정]: 성취="${blueprint.win?.what || ''}" | 주변 반응="${blueprint.win?.reaction || ''}" | stretch=${String(blueprint.win?.stretch)}` : ''}
+${sceneLaughs.length > 0 ? `- [유머/완급 포인트]: ${sceneLaughs.map((l: { what: string }) => l.what).join(' / ')}` : ''}
+${scenePlants.length > 0 ? `- [이 씬에서 매설할 복선]: ${scenePlants.map((p: { what: string; to: string }) => `${p.what} (회수 예정: ${p.to})`).join(' / ')}` : ''}
+${scenePayoffs.length > 0 ? `- [이 씬에서 회수할 복선]: ${scenePayoffs.map((p: { what: string }) => p.what).join(' / ')}` : ''}
+${idx === blueprint.scenes.length - 1 ? `- [회차 마지막 씬 엔딩]: 유형=${blueprint.ending?.type || ''} | 내용=${blueprint.ending?.what || ''}` : ''}
+
+${prevContextBlock}
+
+${revisionBlock}
+
+출력 지시:
+- text: 오직 순수 한국어 웹소설 본문만 작성 (마크다운 기호·제목·메타 주석 금지, 공백 포함 ${minChars}~${maxChars}자).
+- summaryLine: 이 씬에서 벌어진 핵심 사건과 변화를 다음 화 연결용으로 1문장 요약.`,
+        seriesMemoryText
+      );
+
+      const data = await generateStructuredJson<{ text: string; summaryLine: string }>(
+        prompt,
+        writeSceneSchema,
+        {
+          tier: 'high',
+          extraSystem,
+        }
+      );
+
+      return res.json({
+        data: {
+          text: String(data.text ?? '').trim(),
+          summaryLine: String(data.summaryLine ?? '').trim(),
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'AI 씬 본문 집필에 실패했습니다.';
       return res.status(500).json({ error: message });
     }
   });

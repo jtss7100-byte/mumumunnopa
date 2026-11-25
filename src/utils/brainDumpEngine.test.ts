@@ -1,15 +1,18 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  appendSupplementToMemo,
   BRAIN_DUMP_GUIDE_CHIPS,
   buildProjectFromBrainDump,
+  buildSupplementMemoBlock,
   clearEstimatedField,
   extractQuotedLines,
   insertSnippetAtCursor,
   mergeBrainDumpIntoProject,
+  normalizeBrainDumpAuditResult,
 } from './brainDumpEngine';
 import { SEED_MUNPIA_PROJECT } from '../data/seedProject';
-import type { BrainDumpParseResult } from '../types/novelPlanner';
+import type { BrainDumpAuditResult, BrainDumpParseResult } from '../types/novelPlanner';
 
 function makeSampleParseResult(): BrainDumpParseResult {
   return {
@@ -309,5 +312,92 @@ describe('Brain Dump Auto-Parsing Engine', () => {
     const before = ['char.char-1.archetype', 'arc.block.4.cliffhanger', 'blueprint.1.ending'];
     const after = clearEstimatedField(before, 'arc.block.4.cliffhanger');
     assert.deepEqual(after, ['char.char-1.archetype', 'blueprint.1.ending']);
+  });
+
+  it('normalizes Brain Dump Audit results and forces warning status when any high-severity flag exists', () => {
+    const normalized = normalizeBrainDumpAuditResult({
+      status: 'ready', // AI mistakenly said ready despite high flag
+      sufficiencyScore: 142,
+      verdictSummary: '테스트 총평',
+      missingItems: [
+        {
+          id: '',
+          category: '갈등/빌런',
+          reason: '적대 세력이 비어 있습니다.',
+          question: '1권 핵심 빌런은 누구인가요?',
+          quickOptions: ['배신한 장로', '부패한 길드장'],
+        },
+      ],
+      inappropriateFlags: [
+        {
+          id: '',
+          severity: 'high',
+          issueType: '설정 모순',
+          quotedPart: '내공이 전혀 없는데 천마신공 9성을 펼쳤다',
+          reason: '폐맥 설정과 정면 충돌합니다.',
+          fixSuggestions: ['내공 대신 화학 촉매로 구현한다', '초반엔 1성 흔적만 남긴다'],
+        },
+      ],
+    });
+
+    assert.equal(normalized.status, 'warning');
+    assert.equal(normalized.sufficiencyScore, 100);
+    assert.equal(normalized.missingItems[0].id, 'missing-1');
+    assert.equal(normalized.inappropriateFlags[0].id, 'flag-1');
+  });
+
+  it('builds a clean [보충·수정 메모] block from selected options and custom answers and appends it cleanly', () => {
+    const audit: BrainDumpAuditResult = {
+      status: 'warning',
+      sufficiencyScore: 48,
+      verdictSummary: '갈등 축 보충 및 모순 수정이 필요합니다.',
+      missingItems: [
+        {
+          id: 'm1',
+          category: '갈등/빌런',
+          reason: '적대 세력 부재',
+          question: '1권에서 주인공을 압박하는 핵심 적은 누구인가요?',
+          quickOptions: ['가문 내 삼장로 파벌', '경쟁 상단'],
+        },
+        {
+          id: 'm2',
+          category: '1화 사건',
+          reason: '1화 위기 불명확',
+          question: '1화 첫 사이다 장면은 무엇인가요?',
+          quickOptions: ['독탕 현장 해독'],
+        },
+      ],
+      inappropriateFlags: [
+        {
+          id: 'f1',
+          severity: 'high',
+          issueType: '설정 모순',
+          quotedPart: '약골인데 맨손으로 성벽을 부쉈다',
+          reason: '약골 컨셉과 충돌',
+          fixSuggestions: ['폭약 화학 반응으로 성벽을 붕괴시킨다'],
+        },
+      ],
+    };
+
+    const block = buildSupplementMemoBlock(
+      audit,
+      {
+        m1: { selectedOption: '가문 내 삼장로 파벌', customText: '특히 약재고를 독점함' },
+        m2: {}, // unanswered should be omitted
+      },
+      {
+        f1: { selectedOption: '폭약 화학 반응으로 성벽을 붕괴시킨다' },
+      }
+    );
+
+    assert.ok(block.startsWith('[보충·수정 메모]\n'));
+    assert.ok(block.includes('[보충 · 갈등/빌런]'));
+    assert.ok(block.includes('가문 내 삼장로 파벌 / 특히 약재고를 독점함'));
+    assert.ok(!block.includes('1화 첫 사이다'));
+    assert.ok(block.includes('[수정 반영 · 설정 모순]'));
+    assert.ok(block.includes('폭약 화학 반응으로 성벽을 붕괴시킨다'));
+
+    const appended = appendSupplementToMemo('원본 메모입니다.   \n', block);
+    assert.ok(appended.startsWith('원본 메모입니다.\n\n[보충·수정 메모]\n'));
   });
 });

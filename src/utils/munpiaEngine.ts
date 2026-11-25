@@ -235,6 +235,8 @@ export function migrateProjectToV2(project: NovelProject): NovelProject {
     ruleProfile: normalizeRuleProfile(project.ruleProfile),
     episodeRuleOverrides: normalizedOverrides,
     blueprints: migratedBlueprints,
+    manuscripts:
+      project.manuscripts && typeof project.manuscripts === 'object' ? project.manuscripts : {},
   };
 }
 
@@ -782,7 +784,7 @@ export function parseProjectBackupJson(
     if (!parsed.phase0 || typeof parsed.phase0.workingTitle !== 'string') {
       return { ok: false, error: '프로젝트 파일에 phase0.workingTitle 정보가 없습니다.' };
     }
-    const validPhases = ['dump', 0, 1, 2, 3, 4, 'memory'];
+    const validPhases = ['dump', 0, 1, 2, 3, 4, 5, 'memory'];
     const project: NovelProject = {
       id: typeof parsed.id === 'string' && parsed.id ? parsed.id : `proj-import-${Date.now()}`,
       updatedAt: new Date().toISOString(),
@@ -812,6 +814,7 @@ export function parseProjectBackupJson(
       phase3: parsed.phase3 ?? null,
       phase4Blocks: Array.isArray(parsed.phase4Blocks) ? parsed.phase4Blocks : [],
       blueprints: parsed.blueprints && typeof parsed.blueprints === 'object' ? parsed.blueprints : {},
+      manuscripts: parsed.manuscripts && typeof parsed.manuscripts === 'object' ? parsed.manuscripts : {},
     };
     return { ok: true, data: migrateProjectToV2(project) };
   } catch (err) {
