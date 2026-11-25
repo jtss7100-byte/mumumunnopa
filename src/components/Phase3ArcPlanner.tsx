@@ -9,17 +9,27 @@ import {
   Trash2,
 } from 'lucide-react';
 import { PLOT_STRUCTURES } from '../data/munpiaReferences';
-import type { ArcPlan, KickEventItem, SettingBible } from '../types/novelPlanner';
+import type {
+  ArcPlan,
+  KickEventItem,
+  SettingBible,
+  WritingRuleProfile,
+} from '../types/novelPlanner';
 import { analyzeArcWarnings, evaluateThreeQDiagnostics } from '../utils/munpiaEngine';
+import { DEFAULT_RULE_PROFILE } from '../utils/ruleProfileEngine';
 import { requestDeep3QDiagnosisAI, type Deep3QDiagnosis } from '../services/aiClient';
+import { RuleProfileController } from './RuleProfileController';
 
 interface Props {
   arcPlan: ArcPlan | null;
   settingBible: SettingBible | null;
+  ruleProfile?: WritingRuleProfile;
   isGeneratingArc: boolean;
   errorMessage: string | null;
   aiEstimatedFields?: string[];
+  seriesMemoryText?: string;
   onClearEstimatedField?: (fieldKey: string) => void;
+  onChangeRuleProfile?: (next: WritingRuleProfile) => void;
   onChange: (next: ArcPlan) => void;
   onGenerateArcPlan: () => void;
   onOpenBlockInPhase4: (blockIndex: number) => void;
@@ -28,10 +38,13 @@ interface Props {
 export const Phase3ArcPlannerView: React.FC<Props> = ({
   arcPlan,
   settingBible,
+  ruleProfile = DEFAULT_RULE_PROFILE,
   isGeneratingArc,
   errorMessage,
   aiEstimatedFields = [],
+  seriesMemoryText,
   onClearEstimatedField,
+  onChangeRuleProfile,
   onChange,
   onGenerateArcPlan,
   onOpenBlockInPhase4,
@@ -62,8 +75,8 @@ export const Phase3ArcPlannerView: React.FC<Props> = ({
   );
 
   const arcWarnings = useMemo(
-    () => analyzeArcWarnings(arcPlan, settingBible),
-    [arcPlan, settingBible]
+    () => analyzeArcWarnings(arcPlan, settingBible, ruleProfile),
+    [arcPlan, settingBible, ruleProfile]
   );
 
   if (!arcPlan) {
@@ -94,7 +107,12 @@ export const Phase3ArcPlannerView: React.FC<Props> = ({
     setDiagError(null);
     setIsDiagnosing(true);
     try {
-      const res = await requestDeep3QDiagnosisAI(settingBible, arcPlan);
+      const res = await requestDeep3QDiagnosisAI(
+        settingBible,
+        arcPlan,
+        seriesMemoryText,
+        ruleProfile
+      );
       setDeepDiag(res);
     } catch (err) {
       setDiagError(err instanceof Error ? err.message : 'AI 3-Q 정밀 진단에 실패했습니다.');
@@ -186,6 +204,15 @@ export const Phase3ArcPlannerView: React.FC<Props> = ({
           <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
           <p>{errorMessage}</p>
         </div>
+      )}
+
+      {/* Collapsible Plot & Writing Rule Profile Controller (Project Default) */}
+      {onChangeRuleProfile && (
+        <RuleProfileController
+          profile={ruleProfile}
+          onChange={onChangeRuleProfile}
+          testIdPrefix="phase3-rule-controller"
+        />
       )}
 
       {/* Arc Goal */}

@@ -8,7 +8,14 @@ import type {
   NovelProject,
   SettingBible,
   ThreeQDiagnosticItem,
+  WritingRuleProfile,
 } from '../types/novelPlanner';
+import {
+  PLOT_FRAMEWORK_META,
+  RULE_PRESET_META,
+  buildDynamicWriterPromptRules,
+  normalizeRuleProfile,
+} from './ruleProfileEngine';
 
 export const STORAGE_KEY = 'munpia_forge_projects_v1';
 
@@ -214,8 +221,19 @@ export function migrateProjectToV2(project: NovelProject): NovelProject {
       migratedBlueprints[epNum] = syncBlueprintSceneNames(bp, targetChars);
     }
   }
+  const normalizedOverrides: Record<number, WritingRuleProfile> = {};
+  if (project.episodeRuleOverrides && typeof project.episodeRuleOverrides === 'object') {
+    for (const [epKey, ov] of Object.entries(project.episodeRuleOverrides)) {
+      const epNum = Number(epKey);
+      if (!Number.isNaN(epNum) && ov) {
+        normalizedOverrides[epNum] = normalizeRuleProfile(ov);
+      }
+    }
+  }
   return {
     ...project,
+    ruleProfile: normalizeRuleProfile(project.ruleProfile),
+    episodeRuleOverrides: normalizedOverrides,
     blueprints: migratedBlueprints,
   };
 }
@@ -388,32 +406,38 @@ export function analyzeDraftWarnings(text: string, selectedGenres: string[]): Dr
 }
 
 /**
- * Builds the complete Novel Writer master prompt combining Munpia commercial
- * writing rules with the pure v2 episode narrative blueprint JSON.
+ * Builds the complete Novel Writer master prompt dynamically from the active
+ * WritingRuleProfile (only enabled toggles + selected plotFramework) combined
+ * with the pure v2 episode narrative blueprint JSON.
  */
 export function buildNovelWriterMasterPrompt(
   blueprint: EpisodeNarrativeBlueprint,
-  settingBible?: SettingBible | null
+  settingBible?: SettingBible | null,
+  ruleProfile?: WritingRuleProfile | null
 ): string {
   const pure = toPureBlueprintJson(blueprint);
   const pureJson = JSON.stringify(pure, null, 2);
+  const profile = normalizeRuleProfile(ruleProfile);
+  const presetMeta = RULE_PRESET_META.find((p) => p.id === profile.preset) ?? RULE_PRESET_META[3];
+  const frameworkMeta = PLOT_FRAMEWORK_META[profile.plotFramework];
+  const dynamicRules = buildDynamicWriterPromptRules(profile, pure.win.scene);
+
   const targetChars = settingBible?.basicInfo.targetCharsPerEp || 5000;
   const workHeader = settingBible?.title
     ? `작품명: ${settingBible.title} | 회차: ${pure.episode} ${pure.title} | 시점: ${pure.pov} | 목표 분량: 약 ${targetChars.toLocaleString()}자 (최소 3,000자 N마크 충족)`
     : `회차: ${pure.episode} ${pure.title} | 시점: ${pure.pov} | 목표 분량: 약 ${targetChars.toLocaleString()}자 (최소 3,000자 N마크 충족)`;
 
+  const numberedRules = dynamicRules.map((rule, idx) => `${idx + 1}. ${rule}`).join('\n');
+
   return `# [MUNPIA FORGE v2 · Novel Writer 집필 마스터 프롬프트]
 당신은 문피아·네이버 시리즈·카카오페이지 상위권 상업 웹소설 전담 집필가입니다.
-아래 [문피아 상업 집필 실전 규칙]과 [회차 정밀 서사 제어 설계도 JSON]을 100% 준수하여 본문 1화를 집필하십시오.
+아래 [활성 연출·플롯 규칙 프로필]과 [회차 정밀 서사 제어 설계도 JSON]을 100% 준수하여 본문 1화를 집필하십시오.
 
 - ${workHeader}
+- 적용 규칙 프로필: ${presetMeta.emoji} ${presetMeta.label} | 플롯 골격: ${frameworkMeta.label}
 
-## 문피아 상업 집필 실전 규칙 (필수 준수)
-1. [단문 압축 & 지문·대사 분리] 단문 위주로 전개하고 불필요한 부사·접속사(매우, 정말, 그리고, 하지만 등 남발)를 과감히 압축하십시오. 지문은 건조하고 담백하게 서술하되, 생동감 있는 구어체는 반드시 대사로 분리하십시오.
-2. [Telling 스킵 & win.stretch Showing 집중] 일반 이동·시간 경과·감정 전환은 말하기식(Telling)과 한두 줄 요약으로 즉시 스킵하십시오. 오직 \`win.stretch: true\`가 설정된 핵심 보상 씬(\`${pure.win.scene}\`)에서만 해당 씬의 \`sensory\`(감각 앵커)와 주변 인물의 \`win.reaction\`을 활용해 보여주기식(Showing)으로 호흡을 확장하십시오.
-3. [작가 원문 & 금지선 엄수] 각 씬의 \`key_lines\` 원문 대사·독백은 토씨 하나 수정 없이 그대로 삽입하고, 전역 \`avoid\` 금지선 항목은 단 한 줄도 위반하지 마십시오.
-4. [보상 공개 후 절단신공 엔딩] 엔딩(\`ending\`)은 보상이나 반전을 숨긴 채 끊는 낚시("...직전", "정체가 밝혀지려던 찰나" 등)를 금지합니다. 이번 화의 보상·반전·정답을 독자에게 완전히 공개한 뒤, 주인공이 그것을 활용하거나 다음 행동에 돌입하기 직전에 끊는 절단신공을 적용하십시오.
-5. [설계도 정밀 제어 준수] 각 씬의 \`lines\` 비중, \`tension\`(1~5), \`cast\` 화이트리스트, \`terms\` 고유명사 표기, \`prose_tone\`, \`info_gap\`, \`subtext\`, \`anchors\` 전개 순서를 누락 없이 반영하십시오.
+## 활성 플롯 골격 & 집필 규칙 (ON 항목만 적용)
+${numberedRules}
 
 ## 회차 정밀 서사 제어 설계도 (Pure v2 JSON)
 \`\`\`json
@@ -463,9 +487,14 @@ function extractKoreanKeywords(text: string): string[] {
  */
 export function analyzeArcWarnings(
   arcPlan: ArcPlan | null,
-  setting: SettingBible | null
+  setting: SettingBible | null,
+  ruleProfile?: WritingRuleProfile | null
 ): DraftWarning[] {
   if (!arcPlan) return [];
+  const profile = normalizeRuleProfile(ruleProfile);
+  if (!profile.toggles.revealCardsInEp1To5) {
+    return [];
+  }
   const warnings: DraftWarning[] = [];
 
   const introBlock = arcPlan.blocks.find((b) => b.blockIndex === 0);
@@ -575,48 +604,54 @@ const ACTION_UTILIZATION_BEFORE_JIKJEON = /(활용|개시|실행|사용|돌입|�
  * - Flags eventless solo scenes (cast < 2, not win.scene, no 판단/수쓰기 anchor).
  */
 export function analyzeBlueprintWarnings(
-  blueprint: EpisodeNarrativeBlueprint | null
+  blueprint: EpisodeNarrativeBlueprint | null,
+  ruleProfile?: WritingRuleProfile | null
 ): DraftWarning[] {
   if (!blueprint) return [];
+  const profile = normalizeRuleProfile(ruleProfile);
   const warnings: DraftWarning[] = [];
 
-  // 1. Clickbait ending detection
-  const endingWhat = (blueprint.ending?.what ?? '').trim();
-  if (endingWhat) {
-    const matchedExplicitBait = CLICKBAIT_ENDING_PATTERNS.some((re) => re.test(endingWhat));
-    const hasGenericWithholdingJikjeon =
-      /직전/.test(endingWhat) && !ACTION_UTILIZATION_BEFORE_JIKJEON.test(endingWhat);
+  // 1. Clickbait ending detection (active only when revealBeforeCutEnding is ON)
+  if (profile.toggles.revealBeforeCutEnding) {
+    const endingWhat = (blueprint.ending?.what ?? '').trim();
+    if (endingWhat) {
+      const matchedExplicitBait = CLICKBAIT_ENDING_PATTERNS.some((re) => re.test(endingWhat));
+      const hasGenericWithholdingJikjeon =
+        /직전/.test(endingWhat) && !ACTION_UTILIZATION_BEFORE_JIKJEON.test(endingWhat);
 
-    if (matchedExplicitBait || hasGenericWithholdingJikjeon) {
-      warnings.push({
-        severity: '주의',
-        category: '엔딩 낚시성 표현 감지 (ending.what)',
-        message: '보상을 먼저 공개하고 활용 직전에 끊는 것이 편당결제 이탈을 막습니다.',
-      });
+      if (matchedExplicitBait || hasGenericWithholdingJikjeon) {
+        warnings.push({
+          severity: '주의',
+          category: '엔딩 낚시성 표현 감지 (ending.what)',
+          message: '보상을 먼저 공개하고 활용 직전에 끊는 것이 편당결제 이탈을 막습니다.',
+        });
+      }
     }
   }
 
-  // 2. Eventless solo scene detection
-  blueprint.scenes.forEach((sc, idx) => {
-    const sKey = sc.id || `S${idx + 1}`;
-    const castCount = (sc.cast ?? []).map((c) => c.trim()).filter(Boolean).length;
-    const hasDialogue = castCount >= 2;
-    const isWinScene = Boolean(
-      (blueprint.win.scene_id && sc.id && blueprint.win.scene_id === sc.id) ||
-        (blueprint.win.scene && blueprint.win.scene === sc.name)
-    );
-    const hasReasoningTag = (sc.anchors ?? []).some(
-      ([tag]) => tag === '판단' || tag === '수쓰기'
-    );
+  // 2. Eventless solo scene detection (active only when cutNoChangeScenes is ON)
+  if (profile.toggles.cutNoChangeScenes) {
+    blueprint.scenes.forEach((sc, idx) => {
+      const sKey = sc.id || `S${idx + 1}`;
+      const castCount = (sc.cast ?? []).map((c) => c.trim()).filter(Boolean).length;
+      const hasDialogue = castCount >= 2;
+      const isWinScene = Boolean(
+        (blueprint.win.scene_id && sc.id && blueprint.win.scene_id === sc.id) ||
+          (blueprint.win.scene && blueprint.win.scene === sc.name)
+      );
+      const hasReasoningTag = (sc.anchors ?? []).some(
+        ([tag]) => tag === '판단' || tag === '수쓰기'
+      );
 
-    if (!hasDialogue && !isWinScene && !hasReasoningTag) {
-      warnings.push({
-        severity: '권장',
-        category: `단독 씬 스킵 권장 (${sKey} · ${sc.name})`,
-        message: '사건 없는 단독 씬은 요약 한 줄로 스킵하는 것을 권장합니다.',
-      });
-    }
-  });
+      if (!hasDialogue && !isWinScene && !hasReasoningTag) {
+        warnings.push({
+          severity: '권장',
+          category: `단독 씬 스킵 권장 (${sKey} · ${sc.name})`,
+          message: '사건 없는 단독 씬은 요약 한 줄로 스킵하는 것을 권장합니다.',
+        });
+      }
+    });
+  }
 
   return warnings;
 }
@@ -747,7 +782,7 @@ export function parseProjectBackupJson(
     if (!parsed.phase0 || typeof parsed.phase0.workingTitle !== 'string') {
       return { ok: false, error: '프로젝트 파일에 phase0.workingTitle 정보가 없습니다.' };
     }
-    const validPhases = ['dump', 0, 1, 2, 3, 4];
+    const validPhases = ['dump', 0, 1, 2, 3, 4, 'memory'];
     const project: NovelProject = {
       id: typeof parsed.id === 'string' && parsed.id ? parsed.id : `proj-import-${Date.now()}`,
       updatedAt: new Date().toISOString(),
@@ -757,6 +792,11 @@ export function parseProjectBackupJson(
         ? parsed.aiEstimatedFields.map(String)
         : [],
       lastBrainDumpReport: parsed.lastBrainDumpReport ?? null,
+      ruleProfile: parsed.ruleProfile ? normalizeRuleProfile(parsed.ruleProfile) : undefined,
+      episodeRuleOverrides:
+        parsed.episodeRuleOverrides && typeof parsed.episodeRuleOverrides === 'object'
+          ? parsed.episodeRuleOverrides
+          : undefined,
       phase0: {
         workingTitle: parsed.phase0.workingTitle,
         rawIdeaOrPrologue: String(parsed.phase0.rawIdeaOrPrologue ?? ''),

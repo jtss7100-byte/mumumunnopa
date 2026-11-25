@@ -31,6 +31,7 @@ import type {
   NarrativeScene,
   SceneSuggestionResult,
   SettingBible,
+  WritingRuleProfile,
 } from '../types/novelPlanner';
 import {
   analyzeBlueprintWarnings,
@@ -40,7 +41,9 @@ import {
   syncBlueprintSceneNames,
   toPureBlueprintJson,
 } from '../utils/munpiaEngine';
+import { DEFAULT_RULE_PROFILE, normalizeRuleProfile } from '../utils/ruleProfileEngine';
 import { requestSceneSuggestionAI } from '../services/aiClient';
+import { RuleProfileController } from './RuleProfileController';
 
 interface Props {
   activeBlockIndex: number;
@@ -48,11 +51,16 @@ interface Props {
   blocks: EpisodeBlockGuide[];
   blueprints: Record<number, EpisodeNarrativeBlueprint>;
   settingBible: SettingBible | null;
+  projectRuleProfile?: WritingRuleProfile;
+  episodeRuleOverrides?: Record<number, WritingRuleProfile>;
   isGeneratingBlock: boolean;
   isGeneratingBlueprint: boolean;
   errorMessage: string | null;
   aiEstimatedFields?: string[];
+  seriesMemoryText?: string;
   onClearEstimatedField?: (fieldKey: string) => void;
+  onUpdateEpisodeRuleOverride?: (epNum: number, profile: WritingRuleProfile) => void;
+  onClearEpisodeRuleOverride?: (epNum: number) => void;
   onSelectBlock: (blockIndex: number) => void;
   onUpdateBlock: (block: EpisodeBlockGuide) => void;
   onUpdateBlueprint: (epNum: number, bp: EpisodeNarrativeBlueprint) => void;
@@ -79,11 +87,16 @@ export const Phase4NarrativeStudioView: React.FC<Props> = ({
   blocks,
   blueprints,
   settingBible,
+  projectRuleProfile = DEFAULT_RULE_PROFILE,
+  episodeRuleOverrides = {},
   isGeneratingBlock,
   isGeneratingBlueprint,
   errorMessage,
   aiEstimatedFields = [],
+  seriesMemoryText,
   onClearEstimatedField,
+  onUpdateEpisodeRuleOverride,
+  onClearEpisodeRuleOverride,
   onSelectBlock,
   onUpdateBlock,
   onUpdateBlueprint,
@@ -159,9 +172,16 @@ export const Phase4NarrativeStudioView: React.FC<Props> = ({
     return count;
   }, [activeBlueprint]);
 
+  const isEpisodeOverride = Boolean(episodeRuleOverrides[effectiveEpNum]);
+  const effectiveRuleProfile = useMemo(
+    () =>
+      normalizeRuleProfile(episodeRuleOverrides[effectiveEpNum] ?? projectRuleProfile),
+    [episodeRuleOverrides, effectiveEpNum, projectRuleProfile]
+  );
+
   const blueprintWarnings = useMemo(
-    () => analyzeBlueprintWarnings(activeBlueprint),
-    [activeBlueprint]
+    () => analyzeBlueprintWarnings(activeBlueprint, effectiveRuleProfile),
+    [activeBlueprint, effectiveRuleProfile]
   );
 
   const commitBlueprint = (next: EpisodeNarrativeBlueprint) => {
@@ -216,7 +236,11 @@ export const Phase4NarrativeStudioView: React.FC<Props> = ({
 
   const handleCopyMasterPrompt = async () => {
     if (!activeBlueprint) return;
-    const masterPrompt = buildNovelWriterMasterPrompt(activeBlueprint, settingBible);
+    const masterPrompt = buildNovelWriterMasterPrompt(
+      activeBlueprint,
+      settingBible,
+      effectiveRuleProfile
+    );
     try {
       await navigator.clipboard.writeText(masterPrompt);
       setCopiedMasterFlag(true);
@@ -330,7 +354,7 @@ export const Phase4NarrativeStudioView: React.FC<Props> = ({
     setSceneSuggestError(null);
     setSuggestingSceneKey(sceneKey);
     try {
-      const suggestion = await requestSceneSuggestionAI(activeBlueprint, scene);
+      const suggestion = await requestSceneSuggestionAI(activeBlueprint, scene, seriesMemoryText);
       setSceneSuggestions((prev) => ({ ...prev, [sceneKey]: suggestion }));
       setOpenSceneDrawers((prev) => ({ ...prev, [sceneKey]: true }));
     } catch (err) {
@@ -697,6 +721,25 @@ export const Phase4NarrativeStudioView: React.FC<Props> = ({
             </div>
           </div>
         </div>
+
+        {/* Episode-Level Collapsible Plot & Writing Rule Profile Controller */}
+        {onUpdateEpisodeRuleOverride && onClearEpisodeRuleOverride && (
+          <RuleProfileController
+            profile={effectiveRuleProfile}
+            episodeNumber={effectiveEpNum}
+            isEpisodeOverride={isEpisodeOverride}
+            onToggleEpisodeOverride={(useOverride) => {
+              if (useOverride) {
+                onUpdateEpisodeRuleOverride(effectiveEpNum, normalizeRuleProfile(projectRuleProfile));
+              } else {
+                onClearEpisodeRuleOverride(effectiveEpNum);
+              }
+            }}
+            onResetEpisodeOverride={() => onClearEpisodeRuleOverride(effectiveEpNum)}
+            onChange={(nextProfile) => onUpdateEpisodeRuleOverride(effectiveEpNum, nextProfile)}
+            testIdPrefix="phase4-rule-controller"
+          />
+        )}
 
         {/* Hybrid Quick Auto-Assembly Panel vs Manual Lock Banner */}
         {authoringMode === 'auto' ? (

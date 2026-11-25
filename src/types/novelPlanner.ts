@@ -14,7 +14,34 @@ export type {
   SceneSuggestionResult,
 };
 
-export type WorkflowPhase = 'dump' | 0 | 1 | 2 | 3 | 4;
+export type WorkflowPhase = 'dump' | 0 | 1 | 2 | 3 | 4 | 'memory';
+
+export type RuleProfilePreset = 'vol1_survival' | 'main_climax' | 'breather_buildup' | 'custom';
+
+export type PlotFramework =
+  | 'three_step_change'
+  | 'nine_step_loop'
+  | 'fast_cider'
+  | 'slice_buildup'
+  | 'freeform';
+
+export interface WritingRuleToggles {
+  cutNoChangeScenes: boolean;
+  reverseBuildup: boolean;
+  fractalSceneConflict: boolean;
+  boredomBuffer: boolean;
+  secondChorusEscalation: boolean;
+  shortSentencePace: boolean;
+  stretchRewardScene: boolean;
+  revealBeforeCutEnding: boolean;
+  revealCardsInEp1To5: boolean;
+}
+
+export interface WritingRuleProfile {
+  preset: RuleProfilePreset;
+  plotFramework: PlotFramework;
+  toggles: WritingRuleToggles;
+}
 
 export interface BrainDumpReport {
   mode: 'new' | 'merge';
@@ -200,6 +227,8 @@ export interface NovelProject {
   brainDumpText?: string;
   aiEstimatedFields?: string[];
   lastBrainDumpReport?: BrainDumpReport | null;
+  ruleProfile?: WritingRuleProfile;
+  episodeRuleOverrides?: Record<number, WritingRuleProfile>;
   phase0: Phase0Input;
   phase1: PreReadAnalysis | null;
   phase2: SettingBible | null;

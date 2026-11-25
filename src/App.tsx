@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
   Check,
   Download,
   FilePlus2,
   FolderOpen,
+  HardDrive,
   Layers,
   Menu,
   Trash2,
@@ -19,8 +20,18 @@ import type {
   EpisodeNarrativeBlueprint,
   NovelProject,
   WorkflowPhase,
+  WritingRuleProfile,
 } from './types/novelPlanner';
-import { STORAGE_KEY, migrateProjectToV2, parseProjectBackupJson } from './utils/munpiaEngine';
+import { migrateProjectToV2, parseProjectBackupJson } from './utils/munpiaEngine';
+import { normalizeRuleProfile } from './utils/ruleProfileEngine';
+import {
+  formatSaveTimeHHMMSS,
+  loadProjectsFromIndexedDb,
+  parseMasterBackupJson,
+  saveProjectsToIndexedDb,
+  serializeMasterBackup,
+} from './utils/indexedDbStorage';
+import { buildSeriesMemory, formatSeriesMemoryPrompt } from './utils/seriesMemory';
 import {
   buildProjectFromBrainDump,
   clearEstimatedField,
@@ -41,6 +52,7 @@ import { Phase1PreReadView } from './components/Phase1PreRead';
 import { Phase2SettingBibleView } from './components/Phase2SettingBible';
 import { Phase3ArcPlannerView } from './components/Phase3ArcPlanner';
 import { Phase4NarrativeStudioView } from './components/Phase4NarrativeStudio';
+import { SeriesMemoryDashboardView } from './components/SeriesMemoryDashboard';
 import { MunpiaReferenceDrawer } from './components/MunpiaReferenceDrawer';
 
 const PHASE_STEPS: Array<{ phase: WorkflowPhase; code: string; label: string; desc: string }> = [
@@ -50,26 +62,19 @@ const PHASE_STEPS: Array<{ phase: WorkflowPhase; code: string; label: string; de
   { phase: 2, code: 'Phase 2', label: '세팅 바이블', desc: '엔진 · 세계관 · 인물표' },
   { phase: 3, code: 'Phase 3', label: '25화 아크', desc: '킥이벤트 · 3-Q 진단' },
   { phase: 4, code: 'Phase 4', label: '회차 설계도', desc: '5화 가이드 · JSON 빌더' },
+  { phase: 'memory', code: 'DB', label: '누적 시리즈 바이블', desc: '미회수 복선 · 인물 상태 · 용어' },
 ];
 
-function loadInitialProjects(): NovelProject[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map((proj) => migrateProjectToV2(proj));
-      }
-    }
-  } catch {
-    // Ignore corrupt localStorage and fall back to seed
-  }
-  return [migrateProjectToV2(SEED_MUNPIA_PROJECT)];
-}
-
 export default function App() {
-  const [projects, setProjects] = useState<NovelProject[]>(loadInitialProjects);
-  const [activeProjectId, setActiveProjectId] = useState<string>(() => loadInitialProjects()[0].id);
+  const [projects, setProjects] = useState<NovelProject[]>(() => [
+    migrateProjectToV2(SEED_MUNPIA_PROJECT),
+  ]);
+  const [activeProjectId, setActiveProjectId] = useState<string>(SEED_MUNPIA_PROJECT.id);
+  const [storageReady, setStorageReady] = useState<boolean>(false);
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [usedIndexedDb, setUsedIndexedDb] = useState<boolean>(true);
+  const skipNextSaveRef = useRef<boolean>(true);
+
   const [activeBlockIndex, setActiveBlockIndex] = useState<number>(0);
   const [targetPhase4EpNum, setTargetPhase4EpNum] = useState<number | null>(null);
   const [refDrawerOpen, setRefDrawerOpen] = useState(false);
@@ -84,13 +89,23 @@ export default function App() {
   const activeProject =
     projects.find((p) => p.id === activeProjectId) ?? projects[0] ?? SEED_MUNPIA_PROJECT;
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
-    } catch {
-      // Ignore storage quota errors
+  const seriesMemory = useMemo(() => buildSeriesMemory(activeProject), [activeProject]);
+  const seriesMemoryPromptText = useMemo(
+    () => formatSeriesMemoryPrompt(seriesMemory),
+    [seriesMemory]
+  );
+
+  const projectRuleProfile = useMemo(
+    () => normalizeRuleProfile(activeProject.ruleProfile),
+    [activeProject.ruleProfile]
+  );
+
+  const getEffectiveRuleProfile = (epNum?: number): WritingRuleProfile => {
+    if (epNum !== undefined && activeProject.episodeRuleOverrides?.[epNum]) {
+      return normalizeRuleProfile(activeProject.episodeRuleOverrides[epNum]);
     }
-  }, [projects]);
+    return projectRuleProfile;
+  };
 
   const showNotice = (msg: string) => {
     setToastMessage(msg);
@@ -98,6 +113,44 @@ export default function App() {
       setToastMessage((curr) => (curr === msg ? null : curr));
     }, 3000);
   };
+
+  // Hydrate workspace from IndexedDB (auto-migrating legacy localStorage data if present)
+  useEffect(() => {
+    let active = true;
+    loadProjectsFromIndexedDb().then((result) => {
+      if (!active) return;
+      skipNextSaveRef.current = true;
+      setProjects(result.projects);
+      setActiveProjectId(result.projects[0]?.id ?? SEED_MUNPIA_PROJECT.id);
+      setLastSavedAt(result.savedAt);
+      setUsedIndexedDb(result.usedIndexedDb);
+      setStorageReady(true);
+      if (result.migratedFromLocalStorage) {
+        showNotice('기존 localStorage 작품 데이터를 IndexedDB 영구 저장소로 안전하게 이전했습니다.');
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Auto-save to IndexedDB whenever projects change after initial hydration
+  useEffect(() => {
+    if (!storageReady) return;
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false;
+      return;
+    }
+    let cancelled = false;
+    saveProjectsToIndexedDb(projects).then((res) => {
+      if (cancelled) return;
+      setLastSavedAt(res.savedAt);
+      setUsedIndexedDb(res.usedIndexedDb);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [projects, storageReady]);
 
   const updateActiveProject = (updater: (prev: NovelProject) => NovelProject) => {
     setProjects((prevList) =>
@@ -172,6 +225,46 @@ export default function App() {
     e.target.value = '';
   };
 
+  const handleExportMasterBackup = () => {
+    const json = serializeMasterBackup(projects);
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `munpia-forge-master-backup-${dateStamp}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showNotice(`전체 작품 ${projects.length}개 마스터 백업(.json)을 내보냈습니다.`);
+  };
+
+  const handleImportMasterBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const res = parseMasterBackupJson(String(reader.result ?? ''));
+      if (!res.ok) {
+        setAiError(res.error);
+        return;
+      }
+      if (res.isMasterBackup) {
+        setProjects(res.projects);
+        setActiveProjectId(res.projects[0].id);
+        setAiError(null);
+        showNotice(`전체 마스터 백업에서 작품 ${res.projects.length}개를 복원했습니다.`);
+      } else {
+        const imported = { ...res.projects[0], id: `proj-${Date.now()}` };
+        setProjects((prev) => [imported, ...prev]);
+        setActiveProjectId(imported.id);
+        setAiError(null);
+        showNotice(`"${imported.phase0.workingTitle}" 프로젝트를 불러왔습니다.`);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   const handleClearEstimatedField = (fieldKey: string) => {
     updateActiveProject((p) => ({
       ...p,
@@ -220,10 +313,15 @@ export default function App() {
       const parsed = await requestBrainDumpParseAI(
         memo,
         mode,
-        mode === 'merge' ? activeProject : null
+        mode === 'merge' ? activeProject : null,
+        mode === 'merge' ? seriesMemoryPromptText : undefined,
+        projectRuleProfile
       );
       if (mode === 'new') {
-        const created = buildProjectFromBrainDump(memo, parsed);
+        const created = {
+          ...buildProjectFromBrainDump(memo, parsed),
+          ruleProfile: projectRuleProfile,
+        };
         setProjects((prev) => [created, ...prev]);
         setActiveProjectId(created.id);
         showNotice(`"${created.phase0.workingTitle}" 새 작품 전체 자동 세팅을 완료했습니다.`);
@@ -301,7 +399,12 @@ export default function App() {
     setAiError(null);
     setLoadingTask('block');
     try {
-      const result = await requestBlockGuideAI(activeProject.phase2, activeProject.phase3, blockIdx);
+      const result = await requestBlockGuideAI(
+        activeProject.phase2,
+        activeProject.phase3,
+        blockIdx,
+        projectRuleProfile
+      );
       updateActiveProject((p) => {
         const filtered = p.phase4Blocks.filter((b) => b.blockIndex !== blockIdx);
         return { ...p, phase4Blocks: [...filtered, result].sort((a, b) => a.blockIndex - b.blockIndex) };
@@ -327,7 +430,13 @@ export default function App() {
       );
       const prevRow = block?.episodes.find((e) => e.episodeNumber === epRow.episodeNumber - 1);
       const prevSummary = epRow.episodeNumber === 1 ? null : prevRow?.coreIncident ?? null;
-      const result = await requestBlueprintAI(activeProject.phase2, epRow, prevSummary);
+      const result = await requestBlueprintAI(
+        activeProject.phase2,
+        epRow,
+        prevSummary,
+        seriesMemoryPromptText,
+        getEffectiveRuleProfile(epRow.episodeNumber)
+      );
       updateActiveProject((p) => ({
         ...p,
         blueprints: { ...p.blueprints, [epRow.episodeNumber]: result },
@@ -353,7 +462,9 @@ export default function App() {
         activeProject.phase2,
         epNum,
         memo,
-        prevSummary
+        prevSummary,
+        seriesMemoryPromptText,
+        getEffectiveRuleProfile(epNum)
       );
       updateActiveProject((p) => ({
         ...p,
@@ -402,6 +513,13 @@ export default function App() {
   const phaseCompletion = (phase: WorkflowPhase): boolean => {
     if (phase === 'dump') {
       return Boolean(activeProject.lastBrainDumpReport || activeProject.brainDumpText?.trim());
+    }
+    if (phase === 'memory') {
+      return (
+        seriesMemory.unresolvedThreads.length > 0 ||
+        seriesMemory.latestCharacterStates.length > 0 ||
+        seriesMemory.cumulativeTerms.length > 0
+      );
     }
     if (phase === 0) return activeProject.phase0.rawIdeaOrPrologue.trim().length > 0;
     if (phase === 1) return Boolean(activeProject.phase1);
@@ -567,12 +685,45 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
             {toastMessage && (
-              <span className="hidden md:inline text-xs text-emerald-400 whitespace-nowrap">
+              <span className="hidden 2xl:inline text-xs text-emerald-400 whitespace-nowrap max-w-[240px] truncate">
                 {toastMessage}
               </span>
             )}
+            <span
+              data-testid="idb-save-status"
+              className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-mono tabular-nums text-emerald-300 bg-emerald-950/30 border border-emerald-500/30 rounded-lg whitespace-nowrap shrink-0"
+              title="브라우저 내장 IndexedDB 영구 저장소 자동 저장 상태"
+            >
+              <HardDrive className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>
+                {usedIndexedDb ? 'IndexedDB 영구 저장됨' : '로컬 저장됨'} · {formatSaveTimeHHMMSS(lastSavedAt)}
+              </span>
+            </span>
+
+            <div className="hidden xl:flex items-center gap-1 bg-zinc-900/90 border border-zinc-800 rounded-lg p-0.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleExportMasterBackup}
+                className="px-2.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors whitespace-nowrap inline-flex items-center gap-1.5"
+              >
+                <Download className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>전체 마스터 백업(.json) 내보내기</span>
+              </button>
+              <span className="text-zinc-700" aria-hidden="true">|</span>
+              <label className="px-2.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors whitespace-nowrap inline-flex items-center gap-1.5 cursor-pointer">
+                <Upload className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>불러오기</span>
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={handleImportMasterBackup}
+                  className="sr-only"
+                />
+              </label>
+            </div>
+
             <button
               type="button"
               onClick={() => setRefDrawerOpen(true)}
@@ -703,10 +854,15 @@ export default function App() {
             <Phase3ArcPlannerView
               arcPlan={activeProject.phase3}
               settingBible={activeProject.phase2}
+              ruleProfile={projectRuleProfile}
               isGeneratingArc={loadingTask === 'arc'}
               errorMessage={aiError}
               aiEstimatedFields={activeProject.aiEstimatedFields}
+              seriesMemoryText={seriesMemoryPromptText}
               onClearEstimatedField={handleClearEstimatedField}
+              onChangeRuleProfile={(nextRuleProfile) =>
+                updateActiveProject((p) => ({ ...p, ruleProfile: nextRuleProfile }))
+              }
               onChange={(phase3) => updateActiveProject((p) => ({ ...p, phase3 }))}
               onGenerateArcPlan={handleGenerateArc}
               onOpenBlockInPhase4={(blkIdx) => {
@@ -724,11 +880,30 @@ export default function App() {
               blocks={activeProject.phase4Blocks}
               blueprints={activeProject.blueprints}
               settingBible={activeProject.phase2}
+              projectRuleProfile={projectRuleProfile}
+              episodeRuleOverrides={activeProject.episodeRuleOverrides ?? {}}
               isGeneratingBlock={loadingTask === 'block'}
               isGeneratingBlueprint={loadingTask === 'blueprint'}
               errorMessage={aiError}
               aiEstimatedFields={activeProject.aiEstimatedFields}
+              seriesMemoryText={seriesMemoryPromptText}
               onClearEstimatedField={handleClearEstimatedField}
+              onUpdateEpisodeRuleOverride={(epNum, nextProfile) =>
+                updateActiveProject((p) => ({
+                  ...p,
+                  episodeRuleOverrides: {
+                    ...(p.episodeRuleOverrides ?? {}),
+                    [epNum]: nextProfile,
+                  },
+                }))
+              }
+              onClearEpisodeRuleOverride={(epNum) =>
+                updateActiveProject((p) => {
+                  const copy = { ...(p.episodeRuleOverrides ?? {}) };
+                  delete copy[epNum];
+                  return { ...p, episodeRuleOverrides: copy };
+                })
+              }
               onSelectBlock={(blkIdx) => {
                 setActiveBlockIndex(blkIdx);
                 setTargetPhase4EpNum(blkIdx * 5 + 1);
@@ -753,13 +928,23 @@ export default function App() {
               onAssembleFromMemo={handleAssembleBlueprintFromMemo}
             />
           )}
+
+          {activeProject.currentPhase === 'memory' && (
+            <SeriesMemoryDashboardView
+              memory={seriesMemory}
+              onJumpToEpisode={(epNum) => handleJumpFromBrainDump('blueprint', epNum)}
+              onJumpToSetting={() => setPhase(2)}
+            />
+          )}
         </main>
 
         {/* Quiet Studio Footer */}
         <footer className="px-6 lg:px-10 py-4 border-t border-zinc-800/60 text-xs text-zinc-500 flex flex-wrap items-center justify-between gap-2">
           <div className="inline-flex items-center gap-2">
             <Layers className="w-3.5 h-3.5 text-zinc-600" />
-            <span>MUNPIA FORGE · 브라우저 자동 저장 활성</span>
+            <span>
+              MUNPIA FORGE · {usedIndexedDb ? 'IndexedDB 영구 저장소 활성' : '브라우저 자동 저장 활성'}
+            </span>
           </div>
           <span className="font-mono tabular-nums">
             편당결제 100원 가치 · N마크 3,000자 · 표준 5,000자 · 25화 유료화 전환

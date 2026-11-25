@@ -10,6 +10,7 @@ import type {
   PreReadAnalysis,
   SceneSuggestionResult,
   SettingBible,
+  WritingRuleProfile,
 } from '../types/novelPlanner';
 import { syncBlueprintSceneNames } from '../utils/munpiaEngine';
 
@@ -50,28 +51,45 @@ export async function requestArcPlanAI(phase2: SettingBible): Promise<ArcPlan> {
 
 export async function requestDeep3QDiagnosisAI(
   phase2: SettingBible | null,
-  phase3: ArcPlan
+  phase3: ArcPlan,
+  seriesMemoryText?: string,
+  ruleProfile?: WritingRuleProfile
 ): Promise<Deep3QDiagnosis> {
-  return postJson<Deep3QDiagnosis>('/api/ai/diagnose-3q', { phase2, phase3 });
+  return postJson<Deep3QDiagnosis>('/api/ai/diagnose-3q', {
+    phase2,
+    phase3,
+    seriesMemoryText: seriesMemoryText?.trim() || undefined,
+    ruleProfile,
+  });
 }
 
 export async function requestBlockGuideAI(
   phase2: SettingBible,
   phase3: ArcPlan,
-  blockIndex: number
+  blockIndex: number,
+  ruleProfile?: WritingRuleProfile
 ): Promise<EpisodeBlockGuide> {
-  return postJson<EpisodeBlockGuide>('/api/ai/block-guide', { phase2, phase3, blockIndex });
+  return postJson<EpisodeBlockGuide>('/api/ai/block-guide', {
+    phase2,
+    phase3,
+    blockIndex,
+    ruleProfile,
+  });
 }
 
 export async function requestBlueprintAI(
   phase2: SettingBible,
   episodeGuide: EpisodeGuideRow,
-  prevSummary: string | null
+  prevSummary: string | null,
+  seriesMemoryText?: string,
+  ruleProfile?: WritingRuleProfile
 ): Promise<EpisodeNarrativeBlueprint> {
   const raw = await postJson<EpisodeNarrativeBlueprint>('/api/ai/blueprint', {
     phase2,
     episodeGuide,
     prevSummary,
+    seriesMemoryText: seriesMemoryText?.trim() || undefined,
+    ruleProfile,
   });
   return syncBlueprintSceneNames(raw, phase2.basicInfo.targetCharsPerEp || 5000);
 }
@@ -80,28 +98,39 @@ export async function requestAssembleBlueprintFromMemoAI(
   phase2: SettingBible | null,
   episodeNumber: number,
   memo: string,
-  prevSummary: string | null
+  prevSummary: string | null,
+  seriesMemoryText?: string,
+  ruleProfile?: WritingRuleProfile
 ): Promise<EpisodeNarrativeBlueprint> {
   const raw = await postJson<EpisodeNarrativeBlueprint>('/api/ai/blueprint-assemble', {
     phase2,
     episodeNumber,
     memo,
     prevSummary,
+    seriesMemoryText: seriesMemoryText?.trim() || undefined,
+    ruleProfile,
   });
   return syncBlueprintSceneNames(raw, phase2?.basicInfo.targetCharsPerEp || 5000);
 }
 
 export async function requestSceneSuggestionAI(
   blueprint: EpisodeNarrativeBlueprint,
-  scene: NarrativeScene
+  scene: NarrativeScene,
+  seriesMemoryText?: string
 ): Promise<SceneSuggestionResult> {
-  return postJson<SceneSuggestionResult>('/api/ai/scene-suggest', { blueprint, scene });
+  return postJson<SceneSuggestionResult>('/api/ai/scene-suggest', {
+    blueprint,
+    scene,
+    seriesMemoryText: seriesMemoryText?.trim() || undefined,
+  });
 }
 
 export async function requestBrainDumpParseAI(
   memo: string,
   mode: 'new' | 'merge',
-  existingProject?: NovelProject | null
+  existingProject?: NovelProject | null,
+  seriesMemoryText?: string,
+  ruleProfile?: WritingRuleProfile
 ): Promise<BrainDumpParseResult> {
   const existingSummary =
     mode === 'merge' && existingProject
@@ -120,5 +149,7 @@ export async function requestBrainDumpParseAI(
     memo,
     mode,
     existingSummary,
+    seriesMemoryText: mode === 'merge' ? seriesMemoryText?.trim() || undefined : undefined,
+    ruleProfile,
   });
 }
